@@ -2,8 +2,8 @@
 
 仕様: `docs/spec/health-agent.md` / 実装計画: `docs/plan.md`
 
-**フェーズ0（現在）は Hermes も API キーも不要。** CLI と SQLite だけで動く。
-LLM が必要なのは「未知食品の栄養価」と「買い物指示」の2箇所だけで、それはフェーズ1。
+**Hermes は不要。** 記録・集計・診断は CLI と SQLite だけで動き、LLM を使わない。
+**`health nl` だけが API を呼ぶ**（自由入力の解釈。要 `ANTHROPIC_API_KEY`）。
 
 ## セットアップ
 
@@ -45,6 +45,31 @@ health last                   直近の記録を確認
 ```
 
 数量は `*2` `x2` `×2` `:2` `2個` `2本` `2枚` `2杯` などに対応する。
+
+## 自由入力（`nl`）— ここだけ LLM を使う
+
+固い書式で書けないものはこちら。品名も量の言い方も不規則なので、食事はこちらが実用的。
+
+```bash
+health nl "朝はカフェラテ350mlとワッフル、昼はパン3つ。夜は牛丼と卵2個"
+```
+
+- マスタにある品はマスタの値を使う（`claude-haiku-4-5` に名前を突き合わせさせるだけ）
+- **マスタに無い品は栄養価を推定して `foods` に `source='llm'` で追記する。**
+  二度目以降はマスタ参照だけで済み、API を呼ばない
+- 量や種類が判別できなかった点は最後に `?` 付きで報告する。違っていたら `health undo`
+- **筋トレはここを通さない。** `bp 60 8,8,7` の方が打鍵が少なく、しかも無料
+
+準備（この環境には `pip` が無いので `uv` を使う）:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv venv .venv && uv pip install --python .venv/bin/python anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+`.venv` はリポジトリ直下に置く。`bin/health` が自動で見つける。
+**Anthropic Console で spend limit を先に設定すること。**
 
 ## 確認と診断
 

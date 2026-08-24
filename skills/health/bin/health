@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""健康管理エージェント CLI（フェーズ0 — Hermes 不要・LLM 不要）
+"""健康管理エージェント CLI（フェーズ0 — Hermes 不要）
+
+記録・集計・診断は LLM を使わない。`nl` だけが API を呼ぶ。
 
   health init                      DB 作成 + マスタ投入
   health import [path]             手書き記録の Markdown を取り込む
@@ -8,6 +10,9 @@
   health check [--apply]           診断: 問題点と次のアクション
   health last                       直近の記録を表示
   health undo                       直前の記録を取り消す
+
+  health nl "朝はカフェラテ350mlとワッフル、昼はパン3つ"
+                                   自由入力（ここだけ LLM を使う。要 ANTHROPIC_API_KEY）
 
   health bp 60 8,8,7               筋トレ（種目コード + 重量 + レップ）
   health w 64.2                    体重
@@ -24,9 +29,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lib import db, diagnose, history, parse, resolve, store  # noqa: E402
+from lib import db, diagnose, history, nl, parse, resolve, store  # noqa: E402
 
-SUBCOMMANDS = {"init", "import", "today", "check", "last", "undo", "help", "--help", "-h"}
+SUBCOMMANDS = {"init", "import", "today", "check", "last", "undo", "nl", "n",
+                "help", "--help", "-h"}
 WEEKDAYS = "月火水木金土日"
 
 
@@ -48,6 +54,8 @@ def main(argv: list[str]) -> int:
         return cmd_last()
     if cmd == "undo":
         return cmd_undo()
+    if cmd in {"nl", "n"}:
+        return cmd_nl(rest)
     if cmd == "log":
         return cmd_log(rest)
     return cmd_log(argv)
@@ -181,6 +189,52 @@ def cmd_last() -> int:
 def cmd_undo() -> int:
     conn = db.connect()
     print(f"取り消しました: {store.undo(conn)}")
+    return 0
+
+
+# ---------------------------------------------------------------- 自由入力
+
+
+def cmd_nl(rest: list[str]) -> int:
+    if not rest:
+        print('例: health nl "朝はカフェラテ350mlとワッフル、昼はパン3つ"', file=sys.stderr)
+        return 1
+    conn = db.connect()
+    text = " ".join(rest)
+
+    res = nl.interpret(conn, text)
+    if added := nl.upsert_new_foods(conn, res):
+        print("マスタに追加（source='llm'、あとで実物のラベルで直す）:")
+        for a in added:
+            print(f"  + {a}")
+        print()
+
+    if not res.items and res.weight_kg is None:
+        print("記録できるものが読み取れませんでした。", file=sys.stderr)
+        return 1
+
+    # 時刻ごとにまとめて、既存の store 層に流す（記録の形式を1本化する）
+    by_at: dict[str, list[parse.MealItem]] = {}
+    for it in res.items:
+        by_at.setdefault(it["at"], []).append(
+            parse.MealItem(name=it["food_name"], qty=float(it["qty"]))
+        )
+    for at, items in sorted(by_at.items()):
+        w = store.write_meal(conn, parse.Meal(items=items, at=at))
+        print(f"記録 {at}: {w.summary}")
+        for warn in w.warnings:
+            print(f"  ! {warn}")
+
+    if res.weight_kg is not None:
+        w = store.write_body(
+            conn, parse.Body(weight=res.weight_kg, body_fat=res.body_fat)
+        )
+        print(f"記録: {w.summary}")
+
+    if res.unclear:
+        print("\n判別できず推定で埋めた点（違っていたら health undo で消して入れ直す）:")
+        for u in res.unclear:
+            print(f"  ? {u}")
     return 0
 
 
