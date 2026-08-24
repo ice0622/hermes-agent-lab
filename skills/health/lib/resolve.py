@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -66,6 +67,40 @@ def resolve_food(conn: sqlite3.Connection, name: str) -> tuple[sqlite3.Row | Non
     if cands:
         return cands[0], "partial" if len(cands) == 1 else "ambiguous"
     return None, "none"
+
+
+# ---------------------------------------------------------------- 単位の換算
+
+_VOL = {"ml": 1.0, "cc": 1.0, "l": 1000.0}
+_MASS = {"g": 1.0, "kg": 1000.0}
+
+
+def _norm(value: float, unit: str) -> tuple[float, str] | None:
+    """量を (ml換算値, 'volume') か (g換算値, 'mass') に正規化する。"""
+    u = unit.strip().lower()
+    if u in _VOL:
+        return value * _VOL[u], "volume"
+    if u in _MASS:
+        return value * _MASS[u], "mass"
+    return None
+
+
+def base_amount(unit: str) -> tuple[float, str] | None:
+    """マスタの unit 文字列（'200ml' '100g' '個'）から基準量を取り出す。
+
+    個数の単位（'個' '本'）なら None。
+    """
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*([A-Za-z]+)\s*$", unit or "")
+    return _norm(float(m.group(1)), m.group(2)) if m else None
+
+
+def qty_from_amount(food_unit: str, amount: float, amount_unit: str) -> float | None:
+    """「350ml」をマスタの基準量（'200ml'）で割って個数にする。単位が噛み合わなければ None。"""
+    base = base_amount(food_unit)
+    got = _norm(amount, amount_unit)
+    if base is None or got is None or base[1] != got[1] or base[0] <= 0:
+        return None
+    return got[0] / base[0]
 
 
 # ---------------------------------------------------------------- メニュー

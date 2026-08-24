@@ -58,3 +58,16 @@ INSERT OR IGNORE INTO foods (name, alias, unit, unit_g, kcal, protein, fat, carb
 --   おにぎり（鮭）×2 + プロテイン×1 + ミックスナッツ×1 = 635kcal / P39.0  ← タンパク質も稼げる
 --   牛乳×1 + プロテインバー×1 + ゆで卵×2               = 496kcal / P29.6
 --   牛丼（並）×1 を追加するだけ                        = 635kcal / P20.0  ← 最も手数が少ない
+
+-- 追加分（実使用で「マスタに無い」と出たもの。同じく暫定値）
+INSERT OR IGNORE INTO foods (name, alias, unit, unit_g, kcal, protein, fat, carb, source) VALUES
+('ワッフル',            'わっふる',               '個',  70, 250,   4.5, 12.0,  31.0, 'estimate'),
+('菓子パン',            'あんパン,クリームパン,メロンパン', '個',  95, 300,   6.0, 10.0,  46.0, 'estimate'),
+('惣菜パン',            'そうざいパン,焼きそばパン,コロッケパン', '個', 110, 320,   8.0, 14.0,  40.0, 'estimate'),
+('クロワッサン',        'くろわっさん',           '個',  50, 210,   4.0, 12.0,  21.0, 'estimate'),
+('カレーパン',          'かれーパン',             '個', 120, 350,   7.0, 18.0,  40.0, 'estimate'),
+('サンドイッチ（ハムたまご）', 'サンドイッチ,サンド', '個', 130, 300,  12.0, 16.0,  27.0, 'estimate');
+
+-- カフェラテは量で指定できるよう単位を '200ml' に直す（source='estimate' のものだけ触る）
+UPDATE foods SET unit = '200ml', unit_g = 200
+ WHERE name = 'カフェラテ' AND source = 'estimate';

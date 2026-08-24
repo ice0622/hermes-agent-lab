@@ -124,6 +124,16 @@ def write_meal(conn: sqlite3.Connection, cmd: parse.Meal, *, state_dir: Path | N
                 f"`{item.name}` は複数該当したので「{food['name']}」にしました"
                 f"（他: {'、'.join(r['name'] for r in others[:3])}）"
             )
+        if food is not None and item.amount is not None:
+            q = resolve.qty_from_amount(food["unit"], item.amount, item.amount_unit)
+            if q is None:
+                warns.append(
+                    f"`{item.name}` の量指定 {item.amount:g}{item.amount_unit} は"
+                    f"マスタの単位「{food['unit']}」に換算できないので 1{food['unit']} として記録しました"
+                )
+            else:
+                item = parse.MealItem(name=item.name, qty=q)
+
         if food is None:
             # マスタに無くても記録は止めない。栄養価 0 の「未知」として入れる
             cur = conn.execute(

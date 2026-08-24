@@ -9,6 +9,7 @@
     w 64.2               体重
     w 64.2 15.3          体重 + 体脂肪率
     m サラダチキン, おにぎり*2, 味噌汁     食事（カンマ区切り、`*n` で個数）
+    m カフェラテ350ml, 鶏むね肉200g       量で指定（マスタの基準量から個数を算出）
     m 12:30 サラダチキン                  時刻を明示する場合
     t / t push / t legs                  ルーティンのメニュー表示
 
@@ -47,6 +48,9 @@ class Body:
 class MealItem:
     name: str
     qty: float = 1.0
+    # 「350ml」「200g」のように量で指定された場合。個数はマスタの基準量から算出する
+    amount: float | None = None
+    amount_unit: str | None = None
 
 
 @dataclass
@@ -63,14 +67,18 @@ class Menu:
 Command = Train | Body | Meal | Menu
 
 _SPLITS = {"push", "pull", "legs"}
-_COUNTERS = "個|本|枚|杯|パック|缶|玉|切|袋|粒"
+_COUNTERS = "個|本|枚|杯|パック|缶|玉|切|袋|粒|つ|コ|ヶ|かけ|切れ|房|株"
+_AMOUNT_UNITS = "ml|mL|ML|cc|CC|g|G|kg|kG|KG|L|l"
 _TIME_RE = re.compile(r"^([0-2]?\d):([0-5]\d)$")
 _NUM = r"\d+(?:\.\d+)?"
 
 # 'おにぎり*2' / 'おにぎり x2' / 'おにぎり×2' / 'おにぎり:2'
 _QTY_MARK_RE = re.compile(rf"^(?P<name>.+?)\s*[*xX×:]\s*(?P<qty>{_NUM})$")
-# 'おにぎり2個' / 'プロテイン2杯'
+# 'おにぎり2個' / 'プロテイン2杯' / 'パン3つ'
 _QTY_COUNTER_RE = re.compile(rf"^(?P<name>.+?)\s*(?P<qty>{_NUM})\s*(?:{_COUNTERS})$")
+# 'カフェラテ350ml' / '鶏むね肉200g' — 個数ではなく**量**。マスタの基準量で割って個数に直す
+_QTY_AMOUNT_RE = re.compile(
+    rf"^(?P<name>.+?)\s*(?P<amount>{_NUM})\s*(?P<unit>{_AMOUNT_UNITS})$")
 # '60x8' / '60×8' / '60kg×8'
 _SET_PAIR_RE = re.compile(rf"^(?P<w>{_NUM})\s*(?:kg)?\s*[xX×]\s*(?P<r>\d+)$")
 
@@ -159,6 +167,11 @@ def _parse_meal(rest: list[str]) -> Meal:
 
 
 def _parse_meal_item(chunk: str) -> MealItem:
+    # 量指定（350ml / 200g）を先に見る。'g' は個数の単位と紛れないので順序が重要
+    if m := _QTY_AMOUNT_RE.match(chunk):
+        name, amount = m.group("name").strip(), float(m.group("amount"))
+        if name and amount > 0:
+            return MealItem(name=name, amount=amount, amount_unit=m.group("unit").lower())
     for rx in (_QTY_MARK_RE, _QTY_COUNTER_RE):
         if m := rx.match(chunk):
             name = m.group("name").strip()
