@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""健康管理エージェント CLI（フェーズ0 — Hermes 不要・LLM 不要）
+
+  health init                      DB 作成 + マスタ投入
+  health import [path]             手書き記録の Markdown を取り込む
+  health t [push|pull|legs]        ルーティンのメニューを表示
+  health today                     今日の摂取と不足
+  health check [--apply]           診断: 問題点と次のアクション
+  health last                       直近の記録を表示
+  health undo                       直前の記録を取り消す
+
+  health bp 60 8,8,7               筋トレ（種目コード + 重量 + レップ）
+  health w 64.2                    体重
+  health m サラダチキン, おにぎり*2  食事
+
+DB の場所は環境変数 HEALTH_DB、無ければ ~/health/health.db。
+"""
+
+from __future__ import annotations
+
+import sys
+from datetime import date
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from lib import db, diagnose, history, parse, resolve, store  # noqa: E402
+
+SUBCOMMANDS = {"init", "import", "today", "check", "last", "undo", "help", "--help", "-h"}
+WEEKDAYS = "月火水木金土日"
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in {"help", "--help", "-h"}:
+        print(__doc__)
+        return 0
+
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "init":
+        return cmd_init()
+    if cmd == "import":
+        return cmd_import(rest)
+    if cmd == "today":
+        return cmd_today()
+    if cmd == "check":
+        return cmd_check("--apply" in rest)
+    if cmd == "last":
+        return cmd_last()
+    if cmd == "undo":
+        return cmd_undo()
+    if cmd == "log":
+        return cmd_log(rest)
+    return cmd_log(argv)
+
+
+# ---------------------------------------------------------------- init / import
+
+
+def cmd_init() -> int:
+    p = db.db_path()
+    fresh = not p.exists()
+    conn = db.connect(create=True)
+    for name in ("schema.sql", "seed_exercises.sql", "seed_foods.sql"):
+        conn.executescript((db.DDL_DIR / name).read_text(encoding="utf-8"))
+    conn.commit()
+
+    counts = {
+        t: conn.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"]
+        for t in ("exercises", "routines", "foods", "targets")
+    }
+    print(f"{'作成' if fresh else '更新'}: {p}")
+    print("  種目 {exercises} / ルーティン {routines} / 食品 {foods} / 目標 {targets}".format(**counts))
+    if t := db.current_target(conn):
+        print(
+            f"  目標: {t['kcal']:.0f}kcal  P{t['protein']:.0f}  F{t['fat']:.0f}  C{t['carb']:.0f}"
+        )
+    print("\n次: health import   （手書き記録1年分を投入して、初日からグラフが出る状態にする）")
+    return 0
+
+
+def cmd_import(rest: list[str]) -> int:
+    default = db.REPO_ROOT.parent.parent / "docs" / "training-history.md"
+    path = Path(rest[0]) if rest else default
+    if not path.exists():
+        print(f"ファイルがありません: {path}", file=sys.stderr)
+        return 1
+
+    conn = db.connect()
+    res = history.import_into(conn, path)
+    print(f"取り込み: {path.name}")
+    print(f"  セッション {res.sessions} / セット {res.set_rows} 行 / 体重 {res.body_rows} 行")
+    if res.skipped:
+        print(f"  スキップ（種目未登録）: {len(res.skipped)} 件")
+        for s in res.skipped:
+            print(f"    - {s}")
+    if res.unmapped:
+        print(f"  対応表に無い表記: {len(res.unmapped)} 件")
+        for s in res.unmapped[:10]:
+            print(f"    - {s}")
+    return 0
+
+
+# ---------------------------------------------------------------- 記録
+
+
+def cmd_log(argv: list[str]) -> int:
+    conn = db.connect()
+    try:
+        cmd = parse.parse(" ".join(argv))
+    except parse.ParseError as e:
+        print(e, file=sys.stderr)
+        return 1
+
+    if isinstance(cmd, parse.Menu):
+        return show_menu(conn, cmd.split)
+
+    if isinstance(cmd, parse.Train):
+        w = store.write_train(conn, cmd)
+    elif isinstance(cmd, parse.Body):
+        w = store.write_body(conn, cmd)
+    else:
+        w = store.write_meal(conn, cmd)
+
+    print(f"記録: {w.summary}")
+    for warn in w.warnings:
+        print(f"  ! {warn}")
+    return 0
+
+
+def show_menu(conn, split: str | None) -> int:
+    split = split or resolve.suggest_split(conn)
+    rows = resolve.menu(conn, split)
+    if not rows:
+        print(f"{split} のルーティンが未登録です。", file=sys.stderr)
+        return 1
+    resolve.save_last_menu(rows, split)
+
+    last = conn.execute(
+        """SELECT MAX(s.date) d FROM sets s JOIN exercises e ON e.id = s.exercise_id
+           WHERE e.split = ?""",
+        (split,),
+    ).fetchone()["d"]
+    print(f"{split}  （前回: {last or '記録なし'}）")
+    for r in rows:
+        prev = conn.execute(
+            """SELECT weight, reps FROM sets WHERE exercise_id = ?
+               ORDER BY date DESC, set_no ASC LIMIT 1""",
+            (r["id"],),
+        ).fetchone()
+        hint = f"前回 {prev['weight']:g}kg×{prev['reps']}" if prev else "記録なし"
+        print(f"  {r['ord']}. {r['name']:<22} {r['code']:<5} {hint}")
+    print("\n  番号で指定できます:  health 1 60 8,8,7")
+    return 0
+
+
+def cmd_last() -> int:
+    conn = db.connect()
+    print("直近の記録\n")
+    for label, sql in (
+        ("体重", "SELECT date, weight, body_fat FROM body ORDER BY date DESC LIMIT 3"),
+        (
+            "筋トレ",
+            """SELECT s.date, e.name, s.weight, s.reps, s.set_no FROM sets s
+               JOIN exercises e ON e.id = s.exercise_id ORDER BY s.id DESC LIMIT 6""",
+        ),
+        (
+            "食事",
+            "SELECT date, food_name, qty, kcal FROM meals ORDER BY id DESC LIMIT 6",
+        ),
+    ):
+        rows = conn.execute(sql).fetchall()
+        print(f"■ {label}")
+        if not rows:
+            print("  （なし）")
+        for r in rows:
+            print("  " + "  ".join(f"{k}={r[k]}" for k in r.keys() if r[k] is not None))
+        print()
+    return 0
+
+
+def cmd_undo() -> int:
+    conn = db.connect()
+    print(f"取り消しました: {store.undo(conn)}")
+    return 0
+
+
+# ---------------------------------------------------------------- today
+
+
+def cmd_today() -> int:
+    conn = db.connect()
+    d = date.today()
+    print(f"{d.isoformat()}（{WEEKDAYS[d.weekday()]}）\n")
+
+    t = db.current_target(conn)
+    if t is None:
+        print("目標が未設定です。`health init` を実行してください。", file=sys.stderr)
+        return 1
+
+    got = conn.execute("SELECT * FROM v_today").fetchone()
+    vals = {
+        k: (got[k] if got else 0) for k in ("kcal", "protein", "fat", "carb")
+    }
+    print(f"{'':6}{'摂取':>9}{'目標':>9}{'残り':>9}")
+    for key, label, unit in (
+        ("kcal", "kcal", ""), ("protein", "P", "g"), ("fat", "F", "g"), ("carb", "C", "g"),
+    ):
+        got_v, tgt_v = vals[key], t[key]
+        print(f"{label:<6}{got_v:>8.0f}{unit:<1}{tgt_v:>8.0f}{unit:<1}{tgt_v - got_v:>8.0f}{unit}")
+
+    unknown = conn.execute(
+        "SELECT DISTINCT food_name FROM meals WHERE date = ? AND food_id IS NULL",
+        (d.isoformat(),),
+    ).fetchall()
+    if unknown:
+        names = "、".join(r["food_name"] for r in unknown)
+        print(f"\n! マスタに無い食品がカロリー0で入っています: {names}")
+
+    body = conn.execute("SELECT weight FROM body WHERE date = ?", (d.isoformat(),)).fetchone()
+    print(f"\n体重: {body['weight']}kg" if body else "\n体重: 今日は未記録  → health w 64.2")
+    return 0
+
+
+# ---------------------------------------------------------------- check
+
+
+LABEL = {"stop": "[要対応]", "warn": "[注意]", "ok": "[OK]"}
+
+
+def cmd_check(apply: bool) -> int:
+    conn = db.connect()
+    rep = diagnose.run(conn)
+    print(f"診断 {date.today().isoformat()}\n")
+
+    if not rep.findings:
+        print("指摘なし。記録を続けてください。")
+        return 0
+
+    for fi in rep.findings:
+        print(f"■ {fi.title}  {LABEL[fi.severity]}")
+        print(f"  {fi.evidence}")
+        for line in fi.action.split("\n"):
+            print(f"  → {line}" if not line.startswith("  ") else f"  {line}")
+        print()
+
+    if rep.target_change:
+        c = rep.target_change
+        cur = db.current_target(conn)
+        print("提案されている目標の変更")
+        print(f"  {cur['kcal']:.0f}kcal → {c.kcal:.0f}kcal  /  C {cur['carb']:.0f}g → {c.carb:.0f}g")
+        print(f"  理由: {c.note}")
+        if apply:
+            diagnose.apply_change(conn, c)
+            print("  → 適用しました。")
+        else:
+            print("  → 適用するには: health check --apply")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
