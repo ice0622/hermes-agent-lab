@@ -129,8 +129,14 @@ required_environment_variables:
 ├── scripts/
 │   ├── setup.sh          Hermes 導入 + スキル install
 │   └── link-dev.sh       開発用シンボリックリンク
+├── docs/spec/            仕様メモ（/grill-me の出力先）
+├── .claude/skills/       このリポジトリを開発するための Claude Code スキル
+│   └── grill-me/         構想を詰問して仕様に落とす
 └── .env.example          スキルが要求する環境変数のひな形
 ```
+
+`.claude/skills/` は Hermes には配布されない。Hermes 用のスキルは `skills/`、
+このリポジトリ自体を作るための道具は `.claude/skills/` に置く。
 
 ## 参考
 
