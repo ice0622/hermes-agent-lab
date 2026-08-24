@@ -1,0 +1,21 @@
+# 環境変数（APIキーを含むので絶対にコミットしない）
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.uv/
+*.egg-info/
+
+# Hermes のローカル状態
+.hermes/
+*.log
+
+# OS / エディタ
+.DS_Store
+.vscode/
+.idea/
