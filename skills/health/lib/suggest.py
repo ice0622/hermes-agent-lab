@@ -18,7 +18,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 
-MAX_ITEMS = 6  # これ以上並べると買いに行かない
+MAX_ITEMS = 7  # これ以上並べると買いに行かない
 MAX_QTY = 3  # 同じ品をこれ以上は勧めない
 REPEAT_PENALTY = 0.55  # 同じ品を重ねるほど魅力を下げる（1品を積み上げた案は買いに行かない）
 FAT_HARD_RATIO = 0.35  # 残りカロリーのうち脂質由来がこの割合を超える品は避ける
@@ -75,14 +75,20 @@ def _score(r: sqlite3.Row, need: Need, mode: str) -> float:
     """1単位あたりの「効き」。大きいほど良い。"""
     if r["kcal"] <= 0:
         return -1e9
+    kind_w = 0.2 if r["kind"] == "item" else 1.0  # 素材そのままは勧めにくい
     if mode == "fewest":  # 手数最小 = 1品でカロリーを稼ぐ
-        return r["kcal"]
+        return r["kcal"] * kind_w
+    if mode == "dish":
+        # 料理名で出せるものを優先する。素材（item）の羅列にしない
+        w = {"dish": 3.0, "staple": 2.0, "side": 1.2, "snack": 0.9,
+             "drink": 0.8, "item": 0.15}.get(r["kind"], 0.5)
+        return (r["kcal"] + r["protein"] * 12) * w
     if mode == "protein":  # タンパク質優先
-        return r["protein"] * 10 + r["kcal"] * 0.05
+        return (r["protein"] * 10 + r["kcal"] * 0.05) * kind_w
     # balanced: 残りの比率に近い品を選ぶ
     want_p = max(need.protein, 0) / max(need.kcal, 1)
     got_p = r["protein"] / r["kcal"]
-    return r["kcal"] * (1.0 - min(abs(got_p - want_p) * 40, 0.95))
+    return r["kcal"] * (1.0 - min(abs(got_p - want_p) * 40, 0.95)) * kind_w
 
 
 def _build(cands: list[sqlite3.Row], need: Need, mode: str, label: str) -> Plan:
@@ -132,8 +138,8 @@ def plans(conn: sqlite3.Connection, need: Need | None = None) -> list[Plan]:
         return []
     cands = _candidates(conn, need)
     out, seen = [], set()
-    for mode, label in (("fewest", "手数が少ない"), ("protein", "タンパク質を優先"),
-                        ("balanced", "バランス")):
+    for mode, label in (("dish", "料理で組む"), ("protein", "タンパク質を優先"),
+                        ("fewest", "手数が少ない")):
         p = _build(cands, need, mode, label)
         key = tuple(sorted(p.items))
         if p.items and key not in seen:

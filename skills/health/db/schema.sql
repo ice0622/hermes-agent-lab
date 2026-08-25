@@ -26,11 +26,21 @@ CREATE TABLE IF NOT EXISTS foods (
   protein  REAL    NOT NULL,
   fat      REAL    NOT NULL,
   carb     REAL    NOT NULL,
+  kind     TEXT    NOT NULL DEFAULT 'item',
+       -- 'dish'   一皿で成立する料理（サバの味噌煮、豚汁）
+       -- 'staple' 主食（ご飯、パン、麺）
+       -- 'side'   副菜・単品（納豆、ゆで卵、サラダ）
+       -- 'drink'  飲み物
+       -- 'snack'  間食
+       -- 'item'   素材（鶏むね肉100g など。料理の材料）
   source   TEXT    NOT NULL DEFAULT 'estimate',  -- 'estimate' | 'label' | 'mext' | 'llm'
   created_at TEXT  NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 -- source='estimate' は暫定値。初回購入時に実物のラベルを見て 'label' に更新する。
+--
+-- kind を持つ理由: 提案を「素材の羅列」ではなく「料理名」で出すため。
+-- 「鶏むね肉100g + なす1本 + 米100g」ではなく「なすと豚肉の炒め物 + ご飯」と出したい。
 
 CREATE TABLE IF NOT EXISTS meals (
   id        INTEGER PRIMARY KEY,

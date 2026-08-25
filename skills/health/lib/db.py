@@ -41,5 +41,25 @@ def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
+# 既存 DB に後から足した列。CREATE TABLE IF NOT EXISTS では追加されないので
+# init のたびに突き合わせる（SQLite に IF NOT EXISTS 付きの ADD COLUMN が無いため）
+MIGRATIONS: list[tuple[str, str, str]] = [
+    ("foods", "kind", "TEXT NOT NULL DEFAULT 'item'"),
+]
+
+
+def migrate(conn: sqlite3.Connection) -> list[str]:
+    """不足している列を足す。適用した内容を返す。"""
+    applied = []
+    for table, col, decl in MIGRATIONS:
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+            applied.append(f"{table}.{col}")
+    if applied:
+        conn.commit()
+    return applied
+
+
 def current_target(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM v_target").fetchone()

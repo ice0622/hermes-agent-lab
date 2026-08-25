@@ -74,7 +74,10 @@ def cmd_init() -> int:
     p = db.db_path()
     fresh = not p.exists()
     conn = db.connect(create=True)
-    for name in ("schema.sql", "seed_exercises.sql", "seed_foods.sql"):
+    conn.executescript((db.DDL_DIR / "schema.sql").read_text(encoding="utf-8"))
+    if applied := db.migrate(conn):
+        print("列を追加: " + ", ".join(applied))
+    for name in ("seed_exercises.sql", "seed_foods.sql", "seed_dishes.sql"):
         conn.executescript((db.DDL_DIR / name).read_text(encoding="utf-8"))
     conn.commit()
 
