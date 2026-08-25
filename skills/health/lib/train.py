@@ -13,9 +13,11 @@ import sqlite3
 from dataclasses import dataclass
 
 TARGET_SETS = 3
-TARGET_REPS = 10
+TARGET_REPS = 10   # 表示用の上限目安（実際の目標は WORK_REPS で揃える）
 # 重量の刻み。ダンベルとマシンで違うので、その種目の履歴に出た値から推定する
 DEFAULT_STEP = 2.5
+WORK_REPS = 8       # 「常用重量」と見なす最低レップ数
+LOOKBACK_SESSIONS = 4  # 常用重量を探す範囲
 
 
 @dataclass
@@ -37,54 +39,66 @@ def _step(conn: sqlite3.Connection, ex_id: int) -> float:
 
 
 def targets(conn: sqlite3.Connection, split: str, limit: int = 3) -> list[Target]:
+    """各種目の今日の目標。
+
+    基準は「最高重量」ではなく **常用重量**（直近数セッションで
+    WORK_REPS 以上挙げられている最も重い重量）にする。
+    最高重量を基準にすると、40kg×4 のような限界の1セットに引っ張られて
+    「40kg を10回3セット」という非現実的な目標が出る。
+    """
     rows = conn.execute(
         """SELECT r.ord, e.id, e.code, e.name FROM routines r
            JOIN exercises e ON e.id = r.exercise_id
            WHERE r.split = ? ORDER BY r.ord LIMIT ?""", (split, limit)).fetchall()
     out: list[Target] = []
     for r in rows:
-        # 直近3セッションを見る。1セッションだけだと、書き起こしで判読不明だった行や
-        # ウォームアップだけの日に引っ張られて、目標が実力より大幅に低く出る
         recent = [x["d"] for x in conn.execute(
-            "SELECT DISTINCT date d FROM sets WHERE exercise_id=? ORDER BY d DESC LIMIT 3",
-            (r["id"],))]
-        last_date = recent[0] if recent else None
-        if last_date is None:
+            "SELECT DISTINCT date d FROM sets WHERE exercise_id=? ORDER BY d DESC LIMIT ?",
+            (r["id"], LOOKBACK_SESSIONS))]
+        if not recent:
             out.append(Target(r["code"], r["name"], 0, [TARGET_REPS] * TARGET_SETS,
                               "記録が無いので軽い重量から", "記録なし"))
             continue
-        sets = conn.execute(
-            "SELECT weight, reps FROM sets WHERE exercise_id=? AND date=? ORDER BY set_no",
-            (r["id"], last_date)).fetchall()
-        last_txt = " / ".join(
-            (f"{s['weight']:g}kg×{s['reps']}" if s["weight"] else f"自重×{s['reps']}")
-            for s in sets)
-        # 基準重量は直近3セッションの最高。その重量を出した日で3セット揃ったかを見る
-        per_day = {}
-        for d in recent:
-            ss = conn.execute(
-                "SELECT weight, reps FROM sets WHERE exercise_id=? AND date=?",
-                (r["id"], d)).fetchall()
-            if ss:
-                per_day[d] = ss
-        top = max(x["weight"] for ss in per_day.values() for x in ss)
-        ref_day = next(d for d, ss in per_day.items() if any(x["weight"] == top for x in ss))
-        at_top = [x for x in per_day[ref_day] if x["weight"] == top]
-        done = len(at_top) >= TARGET_SETS and all(x["reps"] >= TARGET_REPS for x in at_top)
-        if ref_day != last_date:
-            last_txt += f"（基準は {ref_day} の {top:g}kg）"
 
-        if done:
+        last = conn.execute(
+            "SELECT weight, reps FROM sets WHERE exercise_id=? AND date=? ORDER BY set_no",
+            (r["id"], recent[0])).fetchall()
+        last_txt = " / ".join(
+            (f"{x['weight']:g}kg×{x['reps']}" if x["weight"] else f"自重×{x['reps']}")
+            for x in last)
+
+        # 常用重量: 直近 LOOKBACK_SESSIONS で WORK_REPS 以上を1回でも挙げた最も重い重量
+        rows_all = conn.execute(
+            "SELECT date, weight, reps FROM sets WHERE exercise_id=? AND date IN (%s)"
+            % ",".join("?" * len(recent)), (r["id"], *recent)).fetchall()
+        work = [x for x in rows_all if x["reps"] >= WORK_REPS]
+        if not work:
+            # WORK_REPS に届いていない = 重すぎる。最も軽い重量まで落とす
+            lightest = min(x["weight"] for x in rows_all)
+            out.append(Target(r["code"], r["name"], lightest,
+                              [WORK_REPS] * TARGET_SETS,
+                              f"直近は{WORK_REPS}回に届いていない。{lightest:g}kg まで落として"
+                              f"{WORK_REPS}回×{TARGET_SETS}セットを作る", last_txt))
+            continue
+
+        wt = max(x["weight"] for x in work)
+        # その重量で WORK_REPS 以上が TARGET_SETS 本揃った日があるか
+        best_day, best_n = None, 0
+        for d in recent:
+            n = sum(1 for x in rows_all
+                    if x["date"] == d and x["weight"] == wt and x["reps"] >= WORK_REPS)
+            if n > best_n:
+                best_day, best_n = d, n
+
+        if best_n >= TARGET_SETS:
             step = _step(conn, r["id"])
-            out.append(Target(r["code"], r["name"], top + step,
-                              [8, 8, 8],
-                              f"{top:g}kg で3セット揃っている。{step:g}kg 上げる", last_txt))
+            out.append(Target(r["code"], r["name"], wt + step, [WORK_REPS] * TARGET_SETS,
+                              f"{wt:g}kg で{WORK_REPS}回×{TARGET_SETS}セット揃っている"
+                              f"（{best_day}）。{step:g}kg 上げる", last_txt))
         else:
-            got = len(at_top)
-            out.append(Target(r["code"], r["name"], top,
-                              [TARGET_REPS] * TARGET_SETS,
-                              f"{top:g}kg が{got}セットまで。重量は上げず3セット揃える",
-                              last_txt))
+            out.append(Target(r["code"], r["name"], wt, [WORK_REPS] * TARGET_SETS,
+                              f"{wt:g}kg×{WORK_REPS}回 は{best_n}セットまで。"
+                              f"重量は上げず{TARGET_SETS}セット揃える", last_txt))
     return out
 
 
