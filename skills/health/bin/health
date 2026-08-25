@@ -9,6 +9,7 @@
   health today                     今日の摂取と不足
   health check [--apply]           診断: 問題点と次のアクション
   health report                    dashboard.html を生成して一覧を見る
+  health suggest                   残りを埋める買い物リスト（LLM 不使用）
   health last                       直近の記録を表示
   health undo                       直前の記録を取り消す
 
@@ -30,9 +31,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lib import db, diagnose, history, nl, parse, report, resolve, store  # noqa: E402
+from lib import db, diagnose, history, nl, parse, report, resolve, store, suggest  # noqa: E402
 
-SUBCOMMANDS = {"init", "import", "today", "check", "last", "undo", "nl", "n", "report",
+SUBCOMMANDS = {"init", "import", "today", "check", "last", "undo", "nl", "n", "report", "suggest",
                 "help", "--help", "-h"}
 WEEKDAYS = "月火水木金土日"
 
@@ -55,6 +56,8 @@ def main(argv: list[str]) -> int:
         return cmd_last()
     if cmd == "undo":
         return cmd_undo()
+    if cmd == "suggest":
+        return cmd_suggest("--plain" in rest)
     if cmd == "report":
         return cmd_report(rest)
     if cmd in {"nl", "n"}:
@@ -192,6 +195,19 @@ def cmd_last() -> int:
 def cmd_undo() -> int:
     conn = db.connect()
     print(f"取り消しました: {store.undo(conn)}")
+    return 0
+
+
+# ---------------------------------------------------------------- 買い物リスト
+
+
+def cmd_suggest(plain: bool) -> int:
+    conn = db.connect()
+    need = suggest.current_need(conn)
+    if need is None:
+        print("目標が未設定です。`health init` を実行してください。", file=sys.stderr)
+        return 1
+    print(suggest.format_plans(need, suggest.plans(conn, need), plain=plain))
     return 0
 
 
