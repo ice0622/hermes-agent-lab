@@ -86,6 +86,10 @@ SELECT 'legs', id, ord FROM (
 -- ============================================================ 初期の目標値
 -- 178cm / 64kg / 25歳 / 活動係数1.55 → TDEE 2,530kcal、リーンバルクで +300kcal
 
-INSERT OR IGNORE INTO targets (effective_from, kcal, protein, fat, carb, note) VALUES
-('2026-08-24', 2830, 130, 60, 440,
- '初期値。Mifflin-St Jeor + 1.55 で TDEE 2530kcal、リーンバルクで +300kcal。実測で毎週補正する。');
+-- targets に UNIQUE 制約は付けない（同じ日に複数回補正することがある）。
+-- そのため OR IGNORE では重複を防げず、init のたびに行が増えてしまう。
+-- 1行も無いときだけ入れる。
+INSERT INTO targets (effective_from, kcal, protein, fat, carb, note)
+SELECT '2026-08-24', 2830, 130, 60, 440,
+       '初期値。Mifflin-St Jeor + 1.55 で TDEE 2530kcal、リーンバルクで +300kcal。実測で毎週補正する。'
+WHERE NOT EXISTS (SELECT 1 FROM targets);
