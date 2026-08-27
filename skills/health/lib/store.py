@@ -9,11 +9,13 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from . import db, parse, resolve
 
 LAST_INSERT = "last_insert.json"
+TABLES = {"sets", "body", "meals"}
 
 
 @dataclass
@@ -22,13 +24,49 @@ class Written:
     ids: list[int]
     summary: str
     warnings: list[str]
+    day: str = ""          # 記録した日付（'2026-08-25'）。当日以外なら呼び出し側が明示する
+
+
+def _stamp(on: date | None) -> tuple[str, str]:
+    """(タイムスタンプ, 日付) を返す。
+
+    当日は現在時刻を入れる。**遡って入れるときは時刻が分からないので 00:00 にする**
+    （`history.import_into` が取り込みで使っているのと同じ約束）。
+    """
+    today = db.today_str()
+    if on is None or on.isoformat() == today:
+        return db.now_str(), today
+    return f"{on.isoformat()} 00:00", on.isoformat()
+
+
+def _payload(w: Written) -> dict:
+    return {"table": w.table, "ids": w.ids, "summary": w.summary}
 
 
 def _remember(w: Written, path: Path | None = None) -> None:
+    remember_batch([w], path)
+
+
+def remember_batch(writes: list[Written], path: Path | None = None) -> None:
+    """まとめて1回の `undo` で消せるようにする。
+
+    自由入力は1回の発言で食事・筋トレ・体重が同時に入る。
+    そのうち最後の1件しか消せないと、入れ直しが「undo を何回打つか」の
+    当てものになり、記録が汚れる。
+    """
+    writes = [w for w in writes if w.ids]
+    if not writes:
+        return
     p = path or db.db_path().parent / LAST_INSERT
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
-        json.dumps({"table": w.table, "ids": w.ids, "summary": w.summary}, ensure_ascii=False),
+        json.dumps(
+            {
+                "batch": [_payload(w) for w in writes],
+                "summary": " / ".join(w.summary for w in writes),
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -36,7 +74,13 @@ def _remember(w: Written, path: Path | None = None) -> None:
 # ---------------------------------------------------------------- 筋トレ
 
 
-def write_train(conn: sqlite3.Connection, cmd: parse.Train, *, state_dir: Path | None = None) -> Written:
+def write_train(
+    conn: sqlite3.Connection,
+    cmd: parse.Train,
+    *,
+    on: date | None = None,
+    state_dir: Path | None = None,
+) -> Written:
     if cmd.by_menu_no is not None:
         ex = resolve.exercise_by_menu_no(
             conn, cmd.by_menu_no, (state_dir / resolve.LAST_MENU) if state_dir else None
@@ -55,13 +99,13 @@ def write_train(conn: sqlite3.Connection, cmd: parse.Train, *, state_dir: Path |
                 msg += "\n  候補: " + "、".join(f"{h['code']}({h['name']})" for h in hints)
             raise SystemExit(msg)
 
-    at, day = db.now_str(), db.today_str()
+    at, day = _stamp(on)
     ids = []
     for i, (weight, reps) in enumerate(cmd.sets, start=1):
         cur = conn.execute(
-            "INSERT INTO sets (trained_at, date, exercise_id, weight, reps, set_no) "
-            "VALUES (?,?,?,?,?,?)",
-            (at, day, ex["id"], weight, reps, i),
+            "INSERT INTO sets (trained_at, date, exercise_id, weight, reps, set_no, note) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (at, day, ex["id"], weight, reps, i, cmd.note),
         )
         ids.append(cur.lastrowid)
     conn.commit()
@@ -69,7 +113,10 @@ def write_train(conn: sqlite3.Connection, cmd: parse.Train, *, state_dir: Path |
     body = ", ".join(
         (f"{w:g}kg×{r}" if w else f"自重×{r}") for w, r in cmd.sets
     )
-    w = Written("sets", ids, f"{ex['name']}  {body}  （{len(ids)}セット）", [])
+    summary = f"{ex['name']}  {body}  （{len(ids)}セット）"
+    if cmd.note:
+        summary += f"  memo: {cmd.note}"
+    w = Written("sets", ids, summary, [], day)
     _remember(w, (state_dir / LAST_INSERT) if state_dir else None)
     return w
 
@@ -77,8 +124,14 @@ def write_train(conn: sqlite3.Connection, cmd: parse.Train, *, state_dir: Path |
 # ---------------------------------------------------------------- 体重
 
 
-def write_body(conn: sqlite3.Connection, cmd: parse.Body, *, state_dir: Path | None = None) -> Written:
-    at, day = db.now_str(), db.today_str()
+def write_body(
+    conn: sqlite3.Connection,
+    cmd: parse.Body,
+    *,
+    on: date | None = None,
+    state_dir: Path | None = None,
+) -> Written:
+    at, day = _stamp(on)
     prev = conn.execute("SELECT weight FROM body WHERE date = ?", (day,)).fetchone()
     conn.execute(
         """INSERT INTO body (measured_at, date, weight, body_fat, source)
@@ -98,7 +151,7 @@ def write_body(conn: sqlite3.Connection, cmd: parse.Body, *, state_dir: Path | N
     warns = []
     if prev is not None:
         warns.append(f"同じ日の記録を上書きしました（{prev['weight']}kg → {cmd.weight}kg）")
-    w = Written("body", [row["id"]], s, warns)
+    w = Written("body", [row["id"]], s, warns, day)
     _remember(w, (state_dir / LAST_INSERT) if state_dir else None)
     return w
 
@@ -106,9 +159,15 @@ def write_body(conn: sqlite3.Connection, cmd: parse.Body, *, state_dir: Path | N
 # ---------------------------------------------------------------- 食事
 
 
-def write_meal(conn: sqlite3.Connection, cmd: parse.Meal, *, state_dir: Path | None = None) -> Written:
-    day = db.today_str()
-    at = f"{day} {cmd.at}" if cmd.at else db.now_str()
+def write_meal(
+    conn: sqlite3.Connection,
+    cmd: parse.Meal,
+    *,
+    on: date | None = None,
+    state_dir: Path | None = None,
+) -> Written:
+    now, day = _stamp(on)
+    at = f"{day} {cmd.at}" if cmd.at else now
 
     ids, parts, warns = [], [], []
     for item in cmd.items:
@@ -166,7 +225,7 @@ def write_meal(conn: sqlite3.Connection, cmd: parse.Meal, *, state_dir: Path | N
     summary = (
         "  ".join(parts) + f"  →  {tot['k']:.0f}kcal / P {tot['p']:.0f}g"
     )
-    w = Written("meals", ids, summary, warns)
+    w = Written("meals", ids, summary, warns, day)
     _remember(w, (state_dir / LAST_INSERT) if state_dir else None)
     return w
 
@@ -179,12 +238,15 @@ def undo(conn: sqlite3.Connection, *, state_dir: Path | None = None) -> str:
     if not p.exists():
         raise SystemExit("取り消せる記録がありません。")
     data = json.loads(p.read_text(encoding="utf-8"))
-    table, ids = data["table"], data["ids"]
-    if table not in {"sets", "body", "meals"}:
-        raise SystemExit(f"未知のテーブルです: {table}")
-    conn.execute(
-        f"DELETE FROM {table} WHERE id IN (%s)" % ",".join("?" * len(ids)), ids
-    )
+    # 旧形式（単一テーブル）も読めるようにしておく。移行のために DB を触りたくない
+    batch = data.get("batch") or [{"table": data["table"], "ids": data["ids"]}]
+    for entry in batch:
+        table, ids = entry["table"], entry["ids"]
+        if table not in TABLES:
+            raise SystemExit(f"未知のテーブルです: {table}")
+        conn.execute(
+            f"DELETE FROM {table} WHERE id IN (%s)" % ",".join("?" * len(ids)), ids
+        )
     conn.commit()
     p.unlink()
     return data["summary"]

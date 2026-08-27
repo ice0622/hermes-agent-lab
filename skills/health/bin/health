@@ -13,12 +13,22 @@
   health last                       直近の記録を表示
   health undo                       直前の記録を取り消す
 
-  health nl "朝はカフェラテ350mlとワッフル、昼はパン3つ"
-                                   自由入力（ここだけ LLM を使う。要 ANTHROPIC_API_KEY）
+  health prompt [> file]           ブラウザの Claude に渡すプロンプトを出す
+                                   （マスタ + 書式の指示。API キー不要の経路）
+  health batch [file]              ブラウザの Claude が返した行をまとめて記録する
+                                   （省略時は標準入力。1回の undo で全部消せる）
+
+  health nl "8/25は朝おにぎり2つ。ベンチ40キロ8回8回6回。65.2キロ"
+                                   自由入力（ここだけ API を呼ぶ。要 ANTHROPIC_API_KEY）
+                                   食事・筋トレ・体重をまとめて受け付ける。
+                                   日付を書かなければ今日として記録する
 
   health bp 60 8,8,7               筋トレ（種目コード + 重量 + レップ）
   health w 64.2                    体重
   health m サラダチキン, おにぎり*2  食事
+
+どの記録コマンドにも --date を付けられる（`health w 65.2 --date 8/25`）。
+`8/25` `昨日` `3日前` `先週の火曜` を解釈する。省略すれば今日。
 
 DB の場所は環境変数 HEALTH_DB、無ければ ~/health/health.db。
 """
@@ -31,10 +41,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lib import db, diagnose, history, nl, parse, report, resolve, store, suggest  # noqa: E402
+from lib import (  # noqa: E402
+    batch, db, dates, diagnose, history, nl, parse, report, resolve, store, suggest,
+)
 
 SUBCOMMANDS = {"init", "import", "today", "check", "last", "undo", "nl", "n", "report", "suggest",
-                "help", "--help", "-h"}
+                "prompt", "batch", "b", "help", "--help", "-h"}
 WEEKDAYS = "月火水木金土日"
 
 
@@ -60,6 +72,10 @@ def main(argv: list[str]) -> int:
         return cmd_suggest("--plain" in rest)
     if cmd == "report":
         return cmd_report(rest)
+    if cmd == "prompt":
+        return cmd_prompt()
+    if cmd in {"batch", "b"}:
+        return cmd_batch(rest)
     if cmd in {"nl", "n"}:
         return cmd_nl(rest)
     if cmd == "log":
@@ -117,11 +133,81 @@ def cmd_import(rest: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- 貼り付け経路
+
+
+def cmd_prompt() -> int:
+    """ブラウザの Claude に渡すプロンプトを標準出力に出す。
+
+    API キーが無い環境ではこれが主経路になる。`nl` と違うのは
+    「LLM を誰が呼ぶか」だけで、日付計算とマスタ解決は同じコードを通る。
+    """
+    conn = db.connect()
+    text = batch.prompt(conn)
+    print(text, end="")
+    if sys.stdout.isatty():
+        print(
+            "\n" + "-" * 60 + "\n"
+            "上をコピーしてブラウザの Claude に渡してください。\n"
+            "  ファイルに出す:  health prompt > ~/health/master.md\n"
+            "  claude.ai の Project に添付しておくと、毎回貼らなくて済みます。\n"
+            "  マスタに品や種目が増えたら貼り直してください。",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def cmd_batch(rest: list[str]) -> int:
+    conn = db.connect()
+    src = [a for a in rest if a != "-"]
+    if src:
+        path = Path(src[0])
+        if not path.exists():
+            print(f"ファイルがありません: {path}", file=sys.stderr)
+            return 1
+        text = path.read_text(encoding="utf-8")
+    elif sys.stdin.isatty():
+        print(
+            "貼り付ける内容がありません。\n"
+            "  health batch <<'EOF'\n"
+            "  --date 8/25 w 65.2\n"
+            "  EOF",
+            file=sys.stderr,
+        )
+        return 1
+    else:
+        text = sys.stdin.read()
+
+    res = batch.apply(conn, text)
+    for line in res.echo:
+        print(line)
+
+    if not res.writes and not res.errors:
+        print("記録できる行がありませんでした。", file=sys.stderr)
+        return 1
+
+    if len(res.days) > 1:
+        print(f"\n{len(res.days)} 日分に分けて記録しました: " + "、".join(res.days))
+    if res.writes:
+        print("  取り消す場合は health undo（今入れた分すべて）")
+
+    if res.errors:
+        # 通った行はそのまま残す。1行のミスで全部やり直しにすると貼り直さなくなる
+        # stderr に出す前に stdout を吐く。混ざると「何が入ったか」が読めなくなる
+        sys.stdout.flush()
+        print(f"\n読めなかった行 {len(res.errors)} 件（他の行は記録済み）:", file=sys.stderr)
+        for e in res.errors:
+            print(f"  ! {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 # ---------------------------------------------------------------- 記録
 
 
 def cmd_log(argv: list[str]) -> int:
     conn = db.connect()
+    argv, when = dates.pop_flag(argv)
     try:
         cmd = parse.parse(" ".join(argv))
     except parse.ParseError as e:
@@ -131,14 +217,19 @@ def cmd_log(argv: list[str]) -> int:
     if isinstance(cmd, parse.Menu):
         return show_menu(conn, cmd.split)
 
+    on = None if when.assumed else when.date
     if isinstance(cmd, parse.Train):
-        w = store.write_train(conn, cmd)
+        w = store.write_train(conn, cmd, on=on)
     elif isinstance(cmd, parse.Body):
-        w = store.write_body(conn, cmd)
+        w = store.write_body(conn, cmd, on=on)
     else:
-        w = store.write_meal(conn, cmd)
+        w = store.write_meal(conn, cmd, on=on)
 
-    print(f"記録: {w.summary}")
+    # 当日以外に入れたときだけ日付を出す。毎回出すと読み飛ばされる
+    prefix = "記録" if when.assumed else f"記録 [{w.day}]"
+    print(f"{prefix}: {w.summary}")
+    if when.warning:
+        print(f"  ! {when.warning}")
     for warn in w.warnings:
         print(f"  ! {warn}")
     return 0
@@ -231,10 +322,17 @@ def cmd_report(rest: list[str]) -> int:
 
 def cmd_nl(rest: list[str]) -> int:
     if not rest:
-        print('例: health nl "朝はカフェラテ350mlとワッフル、昼はパン3つ"', file=sys.stderr)
+        print(
+            '例: health nl "8/25は朝おにぎり2つ。ベンチ40キロ8回8回6回。65.2キロ"',
+            file=sys.stderr,
+        )
         return 1
     conn = db.connect()
+    rest, override = dates.pop_flag(rest)
     text = " ".join(rest)
+    if not text.strip():
+        print("入力が空です。", file=sys.stderr)
+        return 1
 
     res = nl.interpret(conn, text)
     if added := nl.upsert_new_foods(conn, res):
@@ -243,33 +341,65 @@ def cmd_nl(rest: list[str]) -> int:
             print(f"  + {a}")
         print()
 
-    if not res.items and res.weight_kg is None:
+    plan = nl.build_plan(conn, res)
+    # --date は文中に日付が無かったものだけ上書きする。
+    # 「8/25は〜」と書いてあるものを --date で潰すと、書いたほうが無視されて事故になる
+    if not override.assumed:
+        plan = _apply_override(plan, override)
+
+    if plan.is_empty():
         print("記録できるものが読み取れませんでした。", file=sys.stderr)
+        for pb in plan.problems:
+            print(f"  ? {pb}", file=sys.stderr)
         return 1
 
-    # 時刻ごとにまとめて、既存の store 層に流す（記録の形式を1本化する）
-    by_at: dict[str, list[parse.MealItem]] = {}
-    for it in res.items:
-        by_at.setdefault(it["at"], []).append(
-            parse.MealItem(name=it["food_name"], qty=float(it["qty"]))
-        )
-    for at, items in sorted(by_at.items()):
-        w = store.write_meal(conn, parse.Meal(items=items, at=at))
-        print(f"記録 {at}: {w.summary}")
-        for warn in w.warnings:
-            print(f"  ! {warn}")
+    writes: list[store.Written] = []
+    for cmd, when in plan.trainings:
+        writes.append(_emit(store.write_train(conn, cmd, on=_on(when)), when))
+    for cmd, when in plan.meals:
+        writes.append(_emit(store.write_meal(conn, cmd, on=_on(when)), when))
+    for cmd, when in plan.body:
+        writes.append(_emit(store.write_body(conn, cmd, on=_on(when)), when))
 
-    if res.weight_kg is not None:
-        w = store.write_body(
-            conn, parse.Body(weight=res.weight_kg, body_fat=res.body_fat)
-        )
-        print(f"記録: {w.summary}")
+    # 1回の発言で入ったものは、1回の undo でまとめて消せるようにする
+    store.remember_batch(writes)
 
-    if res.unclear:
-        print("\n判別できず推定で埋めた点（違っていたら health undo で消して入れ直す）:")
-        for u in res.unclear:
-            print(f"  ? {u}")
+    days = sorted({w.day for w in writes})
+    if len(days) > 1:
+        print(f"\n{len(days)} 日分に分けて記録しました: " + "、".join(days))
+    print("  取り消す場合は health undo（今入れた分すべて）")
+
+    if plan.problems:
+        print("\n判別できず推定で埋めた点:")
+        for pb in plan.problems:
+            print(f"  ? {pb}")
     return 0
+
+
+def _on(when: dates.Resolved):
+    """当日なら None を渡して現在時刻を使わせる。遡るときだけ日付を渡す。"""
+    return None if when.assumed else when.date
+
+
+def _apply_override(plan: nl.Plan, override: dates.Resolved) -> nl.Plan:
+    def fix(pairs):
+        return [(cmd, override if when.assumed else when) for cmd, when in pairs]
+
+    return nl.Plan(
+        trainings=fix(plan.trainings),
+        meals=fix(plan.meals),
+        body=fix(plan.body),
+        problems=plan.problems,
+    )
+
+
+def _emit(w: store.Written, when: dates.Resolved) -> store.Written:
+    print(f"記録 [{w.day}]: {w.summary}")
+    if when.warning:
+        print(f"  ! {when.warning}")
+    for warn in w.warnings:
+        print(f"  ! {warn}")
+    return w
 
 
 # ---------------------------------------------------------------- today

@@ -36,6 +36,9 @@ class Train:
     exercise: str
     sets: list[tuple[float, int]]  # [(重量kg, レップ), ...]
     by_menu_no: int | None = None
+    # 「呼吸を意識しないといけない」「start53kg + プレート50kg」のような一言。
+    # 定型入力では受け取らない（打鍵が増える）。自由入力からのみ入る
+    note: str | None = None
 
 
 @dataclass

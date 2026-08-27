@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from lib import diagnose, history, parse  # noqa: E402
+from lib import batch, dates, diagnose, history, nl, parse, store  # noqa: E402
 
 _fails: list[str] = []
 
@@ -338,6 +338,374 @@ def test_diagnose_actions_always_present():
 
 
 # ============================================================ runner
+
+# ============================================================ dates
+
+
+def test_dates_absolute():
+    T = date(2026, 8, 27)  # 木曜
+    for raw, want in (
+        ("8/25", "2026-08-25"),
+        ("08/25", "2026-08-25"),
+        ("8-25", "2026-08-25"),
+        ("8月25日", "2026-08-25"),
+        ("8月25", "2026-08-25"),
+        ("25日", "2026-08-25"),
+        ("2026-08-25", "2026-08-25"),
+        ("2026/08/25", "2026-08-25"),
+        # 全角と、後置の助詞や時間帯が付いた形
+        ("８/２５", "2026-08-25"),
+        ("8/25の朝", "2026-08-25"),
+        ("8/25は", "2026-08-25"),
+    ):
+        eq(dates.resolve(raw, T).iso, want, f"絶対日付 {raw}")
+
+
+def test_dates_relative():
+    T = date(2026, 8, 27)  # 木曜
+    for raw, want in (
+        ("今日", "2026-08-27"),
+        ("昨日", "2026-08-26"),
+        ("きのう", "2026-08-26"),
+        ("おととい", "2026-08-25"),
+        ("一昨日", "2026-08-25"),
+        ("3日前", "2026-08-24"),
+        ("木曜", "2026-08-27"),        # 今日が木曜なら今日
+        ("火曜", "2026-08-25"),        # 直近の過去
+        ("先週の火曜", "2026-08-18"),
+        ("金曜", "2026-08-21"),        # 明日の金曜ではなく先週の金曜
+    ):
+        eq(dates.resolve(raw, T).iso, want, f"相対日付 {raw}")
+
+
+def test_dates_default_is_today():
+    """日付を書かなければ今日。これが自由入力の前提になっている。"""
+    T = date(2026, 8, 27)
+    for raw in (None, "", "   "):
+        r = dates.resolve(raw, T)
+        eq(r.iso, "2026-08-27", f"既定は今日 {raw!r}")
+        ok(r.assumed, f"assumed が立つ {raw!r}")
+
+
+def test_dates_future_rolls_back():
+    """年の無い M/D が未来になったら去年と読む。未来の記録は存在しない。"""
+    T = date(2026, 1, 5)
+    r = dates.resolve("12/30", T)
+    eq(r.iso, "2025-12-30", "未来の M/D は去年")
+    ok(r.warning is not None, "補正したことを警告する")
+
+    # 1日先までは許す（日付が変わった直後の入力）
+    eq(dates.resolve("1/6", T).iso, "2026-01-06", "翌日はそのまま")
+
+
+def test_dates_unparseable_falls_back_to_today():
+    """読めない日付で記録を落とさない。今日として入れ、警告に回す。"""
+    T = date(2026, 8, 27)
+    for raw in ("ほげ", "2/30", "13/40"):
+        r = dates.resolve(raw, T)
+        eq(r.iso, "2026-08-27", f"読めない日付は今日 {raw}")
+        ok(r.assumed, f"assumed が立つ {raw}")
+        ok(r.warning is not None, f"警告が出る {raw}")
+
+
+def test_dates_pop_flag():
+    T = date(2026, 8, 27)
+    for argv in (["w", "65.2", "--date", "8/25"], ["w", "65.2", "--date=8/25"],
+                 ["--date", "8/25", "w", "65.2"]):
+        rest, when = dates.pop_flag(argv, T)
+        eq(rest, ["w", "65.2"], f"--date を抜く {argv}")
+        eq(when.iso, "2026-08-25", f"--date を解決 {argv}")
+
+    rest, when = dates.pop_flag(["w", "65.2"], T)
+    eq(rest, ["w", "65.2"], "--date なし: 残り")
+    ok(when.assumed, "--date なし: 今日を当てる")
+
+
+# ============================================================ nl.build_plan（API を使わない）
+
+
+def _nl_conn(td: str) -> sqlite3.Connection:
+    return _fresh_db(td)
+
+
+def test_build_plan_dates_and_grouping():
+    """LLM の出力を固定して、日付の解決と食事のまとめ方を検証する。"""
+    T = date(2026, 8, 27)
+    with tempfile.TemporaryDirectory() as td:
+        conn = _nl_conn(td)
+        res = nl.NLResult(
+            meals=[
+                {"food_name": "おにぎり（鮭）", "qty": 2, "at": "08:00",
+                 "date_raw": "8/25", "is_new": False},
+                {"food_name": "納豆", "qty": 1, "at": "08:00",
+                 "date_raw": "8/25", "is_new": False},
+                # 日付が無い → 今日
+                {"food_name": "サラダチキン", "qty": 1, "at": "19:00",
+                 "date_raw": None, "is_new": False},
+            ],
+            trainings=[
+                {"raw": "ベンチ40キロ8回8回6回", "exercise": "bp",
+                 "sets": [{"weight": 40, "reps": 8}, {"weight": 40, "reps": 8},
+                          {"weight": 40, "reps": 6}],
+                 "note": None, "date_raw": "8/25"},
+                # マスタに無い種目は記録せず problems に回す
+                {"raw": "謎マシン30キロ10回", "exercise": "zzz",
+                 "sets": [{"weight": 30, "reps": 10}], "note": None, "date_raw": None},
+                # 自重種目は weight=null → 0
+                {"raw": "懸垂5回4回", "exercise": "pu",
+                 "sets": [{"weight": None, "reps": 5}, {"weight": None, "reps": 4}],
+                 "note": "反動なし", "date_raw": None},
+            ],
+            body=[{"raw": "65.2キロ", "weight_kg": 65.2, "body_fat": None, "date_raw": "8/25"}],
+            unclear=["おにぎりの具は鮭と仮定した"],
+        )
+        plan = nl.build_plan(conn, res, T)
+
+        # 食事は (日付, 時刻) でまとめる。8/25 08:00 に2品、今日 19:00 に1品
+        eq(len(plan.meals), 2, "食事のグループ数")
+        eq([w.iso for _, w in plan.meals], ["2026-08-25", "2026-08-27"], "食事の日付")
+        eq(len(plan.meals[0][0].items), 2, "8/25 朝は2品まとまる")
+        ok(plan.meals[1][1].assumed, "日付なしの食事は今日と明示される")
+
+        # 種目
+        eq(len(plan.trainings), 2, "解決できた種目だけ通る")
+        eq(plan.trainings[0][0].exercise, "bp", "種目コード")
+        eq(plan.trainings[0][0].sets, [(40.0, 8), (40.0, 8), (40.0, 6)], "セット")
+        eq(plan.trainings[0][1].iso, "2026-08-25", "種目の日付")
+        eq(plan.trainings[1][0].sets, [(0.0, 5), (0.0, 4)], "自重は重量0")
+        eq(plan.trainings[1][0].note, "反動なし", "メモが乗る")
+
+        eq(len(plan.body), 1, "体重の件数")
+        eq(plan.body[0][1].iso, "2026-08-25", "体重の日付")
+
+        # 未解決の種目と unclear が両方 problems に入る
+        ok(any("zzz" in p for p in plan.problems), "未知の種目を報告する")
+        ok(any("おにぎり" in p for p in plan.problems), "unclear を引き継ぐ")
+
+
+def test_build_plan_skips_setless_training():
+    with tempfile.TemporaryDirectory() as td:
+        conn = _nl_conn(td)
+        res = nl.NLResult(trainings=[
+            {"raw": "ベンチやった", "exercise": "bp", "sets": [], "note": None, "date_raw": None},
+        ])
+        plan = nl.build_plan(conn, res, date(2026, 8, 27))
+        eq(plan.trainings, [], "レップが無ければ記録しない")
+        ok(plan.problems, "理由を報告する")
+
+
+# ============================================================ store（日付と一括 undo）
+
+
+def test_store_backdate():
+    with tempfile.TemporaryDirectory() as td:
+        conn = _fresh_db(td)
+        sd = Path(td)
+        on = date(2026, 8, 25)
+
+        w = store.write_train(
+            conn, parse.Train(exercise="bp", sets=[(40.0, 8)], note="呼吸"), on=on, state_dir=sd
+        )
+        eq(w.day, "2026-08-25", "筋トレの日付")
+        row = conn.execute("SELECT date, trained_at, note FROM sets").fetchone()
+        eq(row["date"], "2026-08-25", "sets.date")
+        eq(row["trained_at"], "2026-08-25 00:00", "遡りの時刻は 00:00")
+        eq(row["note"], "呼吸", "note が入る")
+
+        w = store.write_body(conn, parse.Body(weight=65.2), on=on, state_dir=sd)
+        eq(w.day, "2026-08-25", "体重の日付")
+        eq(conn.execute("SELECT date FROM body").fetchone()["date"], "2026-08-25", "body.date")
+
+        w = store.write_meal(
+            conn, parse.Meal(items=[parse.MealItem(name="納豆")], at="19:00"), on=on, state_dir=sd
+        )
+        eq(w.day, "2026-08-25", "食事の日付")
+        eq(conn.execute("SELECT eaten_at FROM meals").fetchone()["eaten_at"],
+           "2026-08-25 19:00", "eaten_at は指定時刻")
+
+        # 当日は現在時刻。00:00 に固定してしまうと今日の記録の順序が失われる
+        store.write_body(conn, parse.Body(weight=64.9), state_dir=sd)
+        today = conn.execute(
+            "SELECT measured_at FROM body WHERE date = ?", (date.today().isoformat(),)
+        ).fetchone()
+        ok(today is not None and not today["measured_at"].endswith("00:00"),
+           "当日は現在時刻を入れる")
+
+
+def test_store_batch_undo():
+    """自由入力1回で入った複数テーブルを、1回の undo で消せること。"""
+    with tempfile.TemporaryDirectory() as td:
+        conn = _fresh_db(td)
+        sd = Path(td)
+        on = date(2026, 8, 25)
+        writes = [
+            store.write_train(conn, parse.Train(exercise="bp", sets=[(40.0, 8)]), on=on, state_dir=sd),
+            store.write_meal(conn, parse.Meal(items=[parse.MealItem(name="納豆")]), on=on, state_dir=sd),
+            store.write_body(conn, parse.Body(weight=65.2), on=on, state_dir=sd),
+        ]
+        store.remember_batch(writes, sd / store.LAST_INSERT)
+
+        store.undo(conn, state_dir=sd)
+        for table in ("sets", "meals", "body"):
+            eq(conn.execute(f"SELECT COUNT(*) c FROM {table}").fetchone()["c"], 0,
+               f"{table} が空になる")
+
+
+def test_store_undo_reads_legacy_format():
+    """旧形式（単一テーブル）の last_insert.json も読めること。移行で DB を触らないため。"""
+    import json as _json
+    with tempfile.TemporaryDirectory() as td:
+        conn = _fresh_db(td)
+        sd = Path(td)
+        w = store.write_body(conn, parse.Body(weight=65.2), on=date(2026, 8, 25), state_dir=sd)
+        (sd / store.LAST_INSERT).write_text(
+            _json.dumps({"table": "body", "ids": w.ids, "summary": w.summary}), encoding="utf-8"
+        )
+        store.undo(conn, state_dir=sd)
+        eq(conn.execute("SELECT COUNT(*) c FROM body").fetchone()["c"], 0, "旧形式でも消える")
+
+
+# ============================================================ batch（貼り付け経路・API 不要）
+
+
+def test_batch_records_and_dates():
+    with tempfile.TemporaryDirectory() as td:
+        conn = _fresh_db(td)
+        res = batch.apply(conn, """
+# コメント行は無視される
+
+--date 8/25 bp 40 8,8,6 --note 呼吸を意識する
+--date 8/25 w 65.2
+--date 8/25 m 08:00 納豆, 冷奴
+w 64.9
+""", date(2026, 8, 27))
+
+        eq(res.errors, [], "エラーなし")
+        eq(len(res.writes), 4, "書き込み件数")
+        eq(res.days, ["2026-08-25", "2026-08-27"], "2日分に分かれる")
+
+        row = conn.execute("SELECT date, weight, reps, note FROM sets ORDER BY set_no").fetchone()
+        eq(row["date"], "2026-08-25", "筋トレの日付")
+        eq(row["note"], "呼吸を意識する", "--note が行末まで取られる")
+
+        eq(conn.execute("SELECT COUNT(*) c FROM meals WHERE date='2026-08-25'").fetchone()["c"],
+           2, "食事2品が同じ行から入る")
+        # --date 無しの行は今日
+        ok(conn.execute("SELECT 1 FROM body WHERE date = ?",
+                        (date.today().isoformat(),)).fetchone() is not None,
+           "--date 無しは今日")
+
+
+def test_batch_food_directive():
+    with tempfile.TemporaryDirectory() as td:
+        conn = _fresh_db(td)
+        res = batch.apply(conn, """
+food 惣菜弁当X | 個 | 650 20 20 92 | dish | 総菜弁当X,幕の内X
+m 12:00 惣菜弁当X
+""", date(2026, 8, 27))
+        eq(res.errors, [], "エラーなし")
+
+        f = conn.execute("SELECT * FROM foods WHERE name = '惣菜弁当X'").fetchone()
+        ok(f is not None, "food 行でマスタに入る")
+        eq(f["source"], "llm", "source は llm")
+        eq(f["kind"], "dish", "kind が入る")
+        eq(f["alias"], "総菜弁当X,幕の内X", "alias が入る")
+
+        # 同じ行から記録した食事に、その栄養価が反映されている
+        m = conn.execute("SELECT kcal, protein FROM meals").fetchone()
+        eq(m["kcal"], 650.0, "追加した栄養価で記録される")
+        eq(m["protein"], 20.0, "P も反映")
+
+        # 2回目は上書きしない（実物のラベルで直した値を潰さないため）
+        res2 = batch.apply(conn, "food 惣菜弁当X | 個 | 1 1 1 1", date(2026, 8, 27))
+        eq(res2.errors, [], "既存でもエラーにしない")
+        eq(conn.execute("SELECT kcal FROM foods WHERE name='惣菜弁当X'").fetchone()["kcal"],
+           650.0, "既存の値を変更しない")
+
+
+def test_batch_exercise_directive():
+    with tempfile.TemporaryDirectory() as td:
+        conn = _fresh_db(td)
+        # 同じ貼り付けの中で、追加した種目をすぐ使えること
+        res = batch.apply(conn, """
+ex hipx | ヒップスラストX | 臀部 | legs
+hipx 60 10,10,10
+""", date(2026, 8, 27))
+        eq(res.errors, [], "エラーなし")
+        e = conn.execute("SELECT * FROM exercises WHERE code = 'hipx'").fetchone()
+        ok(e is not None, "ex 行でマスタに入る")
+        eq(e["split"], "legs", "分割が入る")
+        eq(conn.execute("SELECT COUNT(*) c FROM sets").fetchone()["c"], 3,
+           "追加した種目で同じ貼り付け内に記録できる")
+
+        res = batch.apply(conn, "ex badx | だめ | 部位 | ぜんぶ", date(2026, 8, 27))
+        ok(res.errors, "分割が不正なら弾く")
+        ok(conn.execute("SELECT 1 FROM exercises WHERE code='badx'").fetchone() is None,
+           "弾いた行はマスタに入らない")
+
+
+def test_batch_bad_lines_do_not_stop_good_ones():
+    """1行のミスで全部やり直しにしない。貼り直すのが面倒だと記録をやめる。"""
+    with tempfile.TemporaryDirectory() as td:
+        conn = _fresh_db(td)
+        res = batch.apply(conn, """
+--date 8/25 w 64.5
+これはコマンドではない
+--date 8/25 zzz 40 8,8,8
+food 名前だけ
+--date 8/25 m 12:00 納豆
+""", date(2026, 8, 27))
+
+        eq(len(res.errors), 3, "壊れた行の件数")
+        eq(len(res.writes), 2, "通った行は記録される")
+        ok(all("行目" in e for e in res.errors), "行番号が付く")
+        ok(any("zzz" in e for e in res.errors), "未知の種目を報告")
+
+
+def test_batch_is_one_undo():
+    """貼り付け1回 = undo 1回。どこまで戻したか分からなくなるのを避ける。"""
+    with tempfile.TemporaryDirectory() as td:
+        conn = _fresh_db(td)
+        sd = Path(td)
+        # state_dir を使うため、batch が書いた last_insert を差し替えて検証する
+        res = batch.apply(conn, """
+--date 8/25 bp 40 8,8,6
+--date 8/25 w 65.2
+--date 8/25 m 12:00 納豆
+""", date(2026, 8, 27))
+        eq(len(res.writes), 3, "3件入る")
+        store.remember_batch(res.writes, sd / store.LAST_INSERT)
+        store.undo(conn, state_dir=sd)
+        for table in ("sets", "body", "meals"):
+            eq(conn.execute(f"SELECT COUNT(*) c FROM {table}").fetchone()["c"], 0,
+               f"{table} が1回の undo で空になる")
+
+
+def test_batch_rejects_menu_command():
+    with tempfile.TemporaryDirectory() as td:
+        conn = _fresh_db(td)
+        res = batch.apply(conn, "t push", date(2026, 8, 27))
+        ok(res.errors, "メニュー表示は貼り付けでは使えない")
+        eq(res.writes, [], "何も書かない")
+
+
+def test_batch_prompt_contains_masters():
+    """ブラウザに渡すプロンプトに、マスタと書式が両方入っていること。
+
+    どちらかが欠けると、ブラウザ側の Claude が品名や書式を発明する。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        conn = _fresh_db(td)
+        conn.execute(
+            "INSERT INTO foods (name, unit, kcal, protein, fat, carb, kind) "
+            "VALUES ('テスト食品', '個', 100, 10, 5, 3, 'side')"
+        )
+        conn.commit()
+        text = batch.prompt(conn)
+        for needle in ("health batch <<'EOF'", "--date", "food <名前>", "ex <コード>",
+                       "テスト食品", "bp = ベンチプレス", "foods マスタ", "exercises マスタ"):
+            ok(needle in text, f"プロンプトに含まれる: {needle}")
+
 
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
