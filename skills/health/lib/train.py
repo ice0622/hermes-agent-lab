@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 
 TARGET_SETS = 3
 TARGET_REPS = 10   # 表示用の上限目安（実際の目標は WORK_REPS で揃える）
@@ -133,3 +134,29 @@ def suggest_split(conn: sqlite3.Connection) -> tuple[str, str | None]:
         if best_date is None or d < best_date:
             best, best_date = s, d
     return best, best_date
+
+
+def materialize(conn: sqlite3.Connection, *, limit: int = 20) -> int:
+    """3分割ぶんの目標を `plans` に書き出す。Web ダッシュボードはこれを読む。
+
+    targets() は DB だけの純関数なので Web 側でも同じ計算はできるが、そうすると
+    「3セット揃うまで重量を上げない」という規則の実装が2箇所に増える。
+    計算はここだけで行い、結果を置く。全行を置き換えるので冪等。
+    """
+    ids = {r["code"]: r["id"] for r in conn.execute("SELECT id, code FROM exercises")}
+    nxt, _ = suggest_split(conn)
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    rows = []
+    for split in ("push", "pull", "legs"):
+        for i, t in enumerate(targets(conn, split, limit), 1):
+            rows.append((stamp, split, i, ids[t.code], t.code, t.name, t.weight,
+                         "/".join(str(r) for r in t.reps), t.reason, t.last,
+                         1 if split == nxt else 0))
+
+    conn.execute("DELETE FROM plans")
+    conn.executemany(
+        "INSERT INTO plans (computed_at, split, ord, exercise_id, code, name, weight,"
+        " reps, reason, last_txt, is_next) VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    return len(rows)

@@ -9,6 +9,8 @@
   health today                     今日の摂取と不足
   health check [--apply]           診断: 問題点と次のアクション
   health report                    dashboard.html を生成して一覧を見る
+  health plan                      次にやるメニューを計算して plans に保存
+                                   （Web ダッシュボードが読む。記録のたびに自動で走る）
   health suggest                   残りを埋める買い物リスト（LLM 不使用）
   health last                       直近の記録を表示
   health undo                       直前の記録を取り消す
@@ -42,11 +44,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lib import (  # noqa: E402
-    batch, db, dates, diagnose, history, nl, parse, report, resolve, store, suggest,
+    batch, db, dates, diagnose, history, nl, parse, report, resolve, store, suggest, train,
 )
 
 SUBCOMMANDS = {"init", "import", "today", "check", "last", "undo", "nl", "n", "report", "suggest",
-                "prompt", "batch", "b", "help", "--help", "-h"}
+                "prompt", "batch", "b", "plan", "help", "--help", "-h"}
 WEEKDAYS = "月火水木金土日"
 
 
@@ -72,6 +74,8 @@ def main(argv: list[str]) -> int:
         return cmd_suggest("--plain" in rest)
     if cmd == "report":
         return cmd_report(rest)
+    if cmd == "plan":
+        return cmd_plan()
     if cmd == "prompt":
         return cmd_prompt()
     if cmd in {"batch", "b"}:
@@ -130,6 +134,7 @@ def cmd_import(rest: list[str]) -> int:
         print(f"  対応表に無い表記: {len(res.unmapped)} 件")
         for s in res.unmapped[:10]:
             print(f"    - {s}")
+    _replan(conn)
     return 0
 
 
@@ -181,6 +186,8 @@ def cmd_batch(rest: list[str]) -> int:
     res = batch.apply(conn, text)
     for line in res.echo:
         print(line)
+    if res.writes:
+        _replan(conn)
 
     if not res.writes and not res.errors:
         print("記録できる行がありませんでした。", file=sys.stderr)
@@ -220,6 +227,7 @@ def cmd_log(argv: list[str]) -> int:
     on = None if when.assumed else when.date
     if isinstance(cmd, parse.Train):
         w = store.write_train(conn, cmd, on=on)
+        _replan(conn)
     elif isinstance(cmd, parse.Body):
         w = store.write_body(conn, cmd, on=on)
     else:
@@ -289,6 +297,7 @@ def cmd_last() -> int:
 def cmd_undo() -> int:
     conn = db.connect()
     print(f"取り消しました: {store.undo(conn)}")
+    _replan(conn)   # セットが消えたらメニューの前提も変わる
     return 0
 
 
@@ -302,6 +311,38 @@ def cmd_suggest(plain: bool) -> int:
         print("目標が未設定です。`health init` を実行してください。", file=sys.stderr)
         return 1
     print(suggest.format_plans(need, suggest.plans(conn, need), plain=plain))
+    return 0
+
+
+# ---------------------------------------------------------------- 次のメニュー
+
+
+def _replan(conn) -> None:
+    """次のメニューを計算して plans に置き直す。
+
+    記録そのものは通っているので、ここで失敗しても記録は取り消さない。
+    「記録が止まるのが最悪」という方針（docs/plan.md T02）をメニュー側にも適用する。
+    """
+    try:
+        train.materialize(conn)
+    except Exception as e:  # noqa: BLE001 — 記録を巻き込まないため意図的に広く受ける
+        print(f"  ! メニューの再計算に失敗（記録は入っています）: {e}", file=sys.stderr)
+
+
+def cmd_plan() -> int:
+    conn = db.connect()
+    n = train.materialize(conn)
+    rows = conn.execute("SELECT * FROM v_next_plan").fetchall()
+    if not rows:
+        print("ルーティンが未登録です。", file=sys.stderr)
+        return 1
+    print(f"次は {rows[0]['split']}  （{rows[0]['computed_at']} 時点 / 全 {n} 行）\n")
+    for r in rows:
+        load = "自重" if r["weight"] == 0 else f"{r['weight']:g}kg"
+        print(f"  {r['ord']}. {r['name']}")
+        print(f"     {load} × {r['reps'].replace('/', '回 → ')}回")
+        print(f"     {r['reason']}")
+        print(f"     前回 {r['last_txt']}")
     return 0
 
 
@@ -360,6 +401,9 @@ def cmd_nl(rest: list[str]) -> int:
         writes.append(_emit(store.write_meal(conn, cmd, on=_on(when)), when))
     for cmd, when in plan.body:
         writes.append(_emit(store.write_body(conn, cmd, on=_on(when)), when))
+
+    if plan.trainings:
+        _replan(conn)
 
     # 1回の発言で入ったものは、1回の undo でまとめて消せるようにする
     store.remember_batch(writes)

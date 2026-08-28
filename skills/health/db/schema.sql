@@ -111,6 +111,29 @@ CREATE TABLE IF NOT EXISTS targets (
   note    TEXT                          -- '週平均+50gしか増えないので +200kcal'
 );
 
+-- ============================================================ 次にやるメニュー
+
+-- lib/train.py が計算した結果の置き場。**計算式はここに持たない。**
+--
+-- 「3セット揃うまで重量を上げない」という規則を Web 側で書き直すと、同じ規則の実装が
+-- 2箇所に散って必ずずれる。Python が記録のたびに計算して全行を置き換え、
+-- Web は読むだけにする（plan.md T22 の「書き込み側は一切変えない」と同じ向き）。
+CREATE TABLE IF NOT EXISTS plans (
+  id          INTEGER PRIMARY KEY,
+  computed_at TEXT    NOT NULL,           -- '2026-08-28 17:40'
+  split       TEXT    NOT NULL,           -- 'push' | 'pull' | 'legs'
+  ord         INTEGER NOT NULL,           -- ルーティンの表示順
+  exercise_id INTEGER NOT NULL REFERENCES exercises(id),
+  code        TEXT    NOT NULL,
+  name        TEXT    NOT NULL,
+  weight      REAL    NOT NULL,           -- 0 は自重
+  reps        TEXT    NOT NULL,           -- '8/8/8'
+  reason      TEXT    NOT NULL,           -- なぜこの重量なのか。そのまま画面に出す
+  last_txt    TEXT    NOT NULL,           -- 前回の内容
+  is_next     INTEGER NOT NULL DEFAULT 0, -- 次にやるべき分割か
+  UNIQUE(split, ord)
+);
+
 -- ============================================================ ビュー
 
 -- 今日の摂取合計
@@ -150,3 +173,7 @@ SELECT
 FROM sets s JOIN exercises e ON e.id = s.exercise_id
 GROUP BY e.code, s.date
 ORDER BY s.date DESC;
+
+-- 次にやる分割のメニュー
+CREATE VIEW IF NOT EXISTS v_next_plan AS
+SELECT * FROM plans WHERE is_next = 1 ORDER BY ord;
