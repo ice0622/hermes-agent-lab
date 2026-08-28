@@ -40,3 +40,6 @@ venv/
 # 出力先を ~/health ではなくリポジトリ内に向けて動かしたときの生成物。
 # `skills/health/` を巻き込まないよう先頭の / は必須。
 /health/
+
+# Vercel CLI のプロジェクト link
+.vercel

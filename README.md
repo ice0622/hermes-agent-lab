@@ -38,6 +38,17 @@ hermes setup
 hermes skills install ice0622/hermes-agent-lab
 ```
 
+## Web ダッシュボード（`web/`）
+
+`health.db` を読むだけの Next.js + TypeScript。Hermes のスキル探索は `skills/` を
+3階層で走査するので（`scripts/link-dev.sh`）、`web/` がスキルと誤認されることはない。
+
+```bash
+cd web && cp .env.example .env.local && npm install && npm run dev
+```
+
+詳細は [web/README.md](web/README.md)。
+
 ## 開発ループ
 
 `hermes skills install` は取得したスキルをコピーするので、**編集するたびに入れ直すことになる**。

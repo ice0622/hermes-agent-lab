@@ -1,0 +1,25 @@
+# Root Directory は web/ なので、ビルドに要るのは web/ だけ。
+# それ以外は上げない — 特に健康データの実体を Vercel に送らないこと。
+
+.git
+.venv
+.claude
+.agents
+prototypes
+
+# 健康データの実体と生成物（~/health のコピー）
+health
+*.db
+*.db-wal
+*.db-shm
+
+# Python 側。ビルドには不要
+skills
+scripts
+docs
+
+# web/ の中の生成物とローカル設定
+web/node_modules
+web/.next
+web/.env
+web/.env.*

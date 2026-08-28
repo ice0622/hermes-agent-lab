@@ -1,0 +1,135 @@
+/* トークンは health/dashboard.html（report.py が出す静的版）と揃えてある。
+   同じデータの別の見せ方なので、色や角丸が違うと別プロダクトに見えてしまう。 */
+:root {
+  --surface: #ffffff; --card: #ffffff; --ink: #111111; --ink2: #5a5a5a; --muted: #8f8f8f;
+  --grid: #e8e8e8; --mark: #1a1a1a; --mark2: #bcbcbc; --line: #e2e2e2; --fill: #2b2b2b;
+  --up: #1a1a1a; --flat: #9a9a9a;
+  --s1: #1f1f1f; --s2: #4a4a4a; --s3: #757575; --s4: #a0a0a0; --s5: #c4c4c4; --s6: #e0e0e0;
+  --ease: cubic-bezier(.16, 1, .3, 1);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #0e0e0e; --card: #161616; --ink: #f2f2f2; --ink2: #b4b4b4; --muted: #7e7e7e;
+    --grid: #2a2a2a; --mark: #ededed; --mark2: #5c5c5c; --line: #2a2a2a; --fill: #e4e4e4;
+    --up: #ededed; --flat: #6a6a6a;
+    --s1: #f0f0f0; --s2: #c2c2c2; --s3: #949494; --s4: #6e6e6e; --s5: #4a4a4a; --s6: #303030;
+  }
+}
+
+* { box-sizing: border-box; }
+html { color-scheme: light dark; }
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--ink);
+  font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1000px; margin: 0 auto; padding: 34px 20px 96px; }
+
+h1 { font-size: 20px; font-weight: 600; letter-spacing: .02em; margin: 0 0 3px; }
+.sub { color: var(--muted); font-size: 13px; margin: 0; }
+h2 {
+  font-size: 13px; font-weight: 600; letter-spacing: .08em; color: var(--ink2);
+  margin: 46px 0 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line);
+}
+h2 .cnt { float: right; font-weight: 500; letter-spacing: 0; color: var(--muted); }
+.lede { font-size: 13px; color: var(--muted); margin: 12px 0 18px; }
+.lede b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; }
+.note { font-size: 12px; color: var(--muted); margin: 12px 0 0; }
+.warn {
+  font-size: 13px; border: 1px solid var(--line); border-left: 3px solid var(--mark2);
+  border-radius: 0 8px 8px 0; padding: 12px 16px; margin: 16px 0 0; color: var(--ink2);
+  background: var(--card);
+}
+.warn b { color: var(--ink); }
+
+/* -------------------------------------------------- 次のセッション */
+.plan-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.plan-split { font-size: 30px; font-weight: 600; letter-spacing: -.01em; line-height: 1.1; }
+.plan-meta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.plan-list { margin-top: 18px; display: grid; gap: 0; }
+.plan-row {
+  display: grid; grid-template-columns: 26px 1fr 168px; gap: 16px; align-items: baseline;
+  padding: 15px 0; border-bottom: 1px solid var(--line);
+}
+.plan-row:last-child { border-bottom: 0; }
+.plan-no { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.plan-name { font-size: 15px; }
+.plan-why { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.plan-why .prev { color: var(--ink2); }
+.plan-target { text-align: right; font-variant-numeric: tabular-nums; }
+.plan-kg { font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
+.plan-kg small { font-size: 12px; font-weight: 500; color: var(--ink2); margin-left: 2px; }
+.plan-reps { font-size: 12px; color: var(--muted); margin-top: 2px; }
+@media (max-width: 640px) {
+  .plan-row { grid-template-columns: 22px 1fr; }
+  .plan-target { grid-column: 2; text-align: left; }
+}
+
+/* -------------------------------------------------- 種目カード */
+.lift-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.lift {
+  border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px 12px; background: var(--card);
+}
+.lift-name { font-size: 13px; color: var(--ink2); display: flex; justify-content: space-between; gap: 8px; }
+.lift-name .tag {
+  font-size: 10px; letter-spacing: .06em; color: var(--muted); text-transform: uppercase;
+  border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; align-self: center;
+}
+.lift-rm {
+  font-size: 30px; font-weight: 600; line-height: 1.15; letter-spacing: -.02em;
+  margin-top: 8px; font-variant-numeric: tabular-nums;
+}
+.lift-rm small { font-size: 13px; font-weight: 500; color: var(--ink2); margin-left: 2px; }
+.lift-delta { font-size: 12px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+.lift-delta.up { color: var(--up); }
+.lift-delta.flat { color: var(--flat); }
+.lift-stale { font-size: 11px; color: var(--muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
+@media (max-width: 900px) { .lift-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 600px) { .lift-grid { grid-template-columns: 1fr; } }
+
+/* -------------------------------------------------- グラフ共通 */
+.chart { width: 100%; height: auto; display: block; overflow: visible; }
+.gridline { stroke: var(--grid); stroke-width: 1; }
+.axis { fill: var(--muted); font-size: 10px; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--muted); margin-top: 12px; }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.legend .dot { border-radius: 50%; background: var(--mark); }
+.legend .ln { width: 18px; height: 2px; border-radius: 1px; background: var(--mark2); }
+
+/* -------------------------------------------------- 表 */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th {
+  text-align: left; font-weight: 600; font-size: 11px; letter-spacing: .06em; color: var(--muted);
+  padding: 0 10px 8px 0; border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+td { padding: 8px 10px 8px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: 0; }
+.num { text-align: right; }
+td.name { font-variant-numeric: normal; }
+.bar-cell { width: 40%; }
+.bar-track { height: 8px; background: var(--grid); border-radius: 4px; overflow: hidden; }
+.bar-in { height: 100%; background: var(--fill); border-radius: 4px; transform-origin: left center; }
+
+/* -------------------------------------------------- 入りのモーション
+   ease-out・200ms 台・transform と opacity だけ。 */
+@keyframes riseIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.rise { animation: riseIn 220ms var(--ease) both; animation-delay: calc(var(--i, 0) * 30ms); }
+@media (prefers-reduced-motion: reduce) { .rise { animation: none; } }
+
+.foot { margin-top: 56px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+.foot code { font-size: 11px; }
+
+/* -------------------------------------------------- セットアップ案内 */
+.steps { margin: 18px 0 0; padding: 0 0 0 22px; display: grid; gap: 18px; }
+.steps li { font-size: 14px; }
+.steps b { display: block; font-weight: 600; margin-bottom: 3px; }
+.steps span { display: block; font-size: 13px; color: var(--ink2); }
+.steps em { font-style: normal; color: var(--ink); }
+.steps code {
+  font-size: 12px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 4px; padding: 1px 5px;
+}
