@@ -23,7 +23,20 @@ venv/
 # Claude Code のローカル設定（個人ごとのパーミッション許可リスト）
 .claude/settings.local.json
 
+# Claude Code のスキル置き場。
+#
+# animations.dev（有料教材）由来のスキルが入っているので**再配布しない**。
+# 個別に列挙すると入れ足したときに漏れるので、除外を既定にして
+# 自分で持ち出してよいものだけ明示的に通す。
+/.claude/skills/*
+!/.claude/skills/grill-me/
+!/.claude/skills/grilling
+
 # 健康管理エージェントの DB 実体（~/health/health.db に置くが、念のため）
 *.db
 *.db-wal
 *.db-shm
+
+# 出力先を ~/health ではなくリポジトリ内に向けて動かしたときの生成物。
+# `skills/health/` を巻き込まないよう先頭の / は必須。
+/health/
